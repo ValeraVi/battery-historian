@@ -1930,7 +1930,7 @@ func parseAndAccumulateControllerData(pc checkinutil.Counter, section string, re
 // wakelock name, time, count
 func parseSystemKernelWakelock(record []string, system *bspb.BatteryStats_System) (string, []error) {
 	w := &bspb.BatteryStats_System_KernelWakelock{}
-	warn, plErrs := parseLine(kernelWakelockData, record, w)
+	warn, plErrs := parseLineSystemKernelWakelock(kernelWakelockData, record, w)
 	if len(plErrs) > 0 {
 		return warn, plErrs
 	}
@@ -2510,5 +2510,51 @@ func parseLine(section string, record []string, p proto.Message) (string, []erro
 			errs = append(errs, fmt.Errorf("error parsing %s: %v", section, err))
 		}
 	}
+	return warn, errs
+}
+
+// same as parseLine but implements workaround for KernelWakelock, in case the name
+// of wakelock contains the commas.
+func parseLineSystemKernelWakelock(section string, record []string, p proto.Message) (string, []error) {
+	var warn string
+	var errs []error
+	pV := reflect.ValueOf(p)
+	// Assuming that:
+	// 1st field - is a name
+	// then next 4 fields is a numbers, with optional "-" for negative values.
+	// If a records after first record (name) can't be parsed as mumber, assuming that it is a part of name.
+	//   In this case name will be concatenated in one string with commas between each field
+	//   (assume, that in original name there was no spaces around commas, otherwise spaces may be lost).
+	num := len(record)
+	i := 0
+
+	// Parse the first field - name:
+	name := record[i]
+	for i++; i < num; i++ {
+		if _, err := strconv.ParseFloat(record[i], 64); err == nil {
+			break
+		}
+		name += "," + record[i]
+	}
+	pV.Elem().Field(0).Set(reflect.New(pV.Elem().Field(0).Type().Elem()))
+	pV.Elem().Field(0).Elem().SetString(name)
+
+	// Parsing remaining fields:
+	if (num - (i-1)) > pV.Elem().NumField() - 1 {
+		num = (i-1) + pV.Elem().NumField() - 1
+		warn = fmt.Sprintf("The underlying format for %s has %d additional field(s) that are not captured.", section, len(record)-num)
+	}
+
+	for j := 1; i < num; i++ {
+		valPtrV := reflect.New(pV.Elem().Field(j).Type().Elem())
+		if err := parseValue(record[i], valPtrV.Elem()); err == nil {
+			pV.Elem().Field(j).Set(valPtrV)
+		} else {
+			errs = append(errs, fmt.Errorf("error parsing %s: %v", section, err))
+			errs = append(errs, fmt.Errorf("Check also that %s rows in CHECKIN BATTERYSTATS section does not contains commas in the record next to %s", section, section))
+		}
+		j++
+	}
+
 	return warn, errs
 }
